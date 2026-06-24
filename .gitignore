@@ -1,0 +1,7 @@
+venv/
+database/
+input/
+schemas/
+
+*.pyc
+__pycache__/

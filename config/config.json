@@ -1,0 +1,6 @@
+{
+    "input_folder": "input",
+    "schema_folder": "schemas",
+    "report_folder": "reports",
+    "database_path": "database/validation.db"
+}
