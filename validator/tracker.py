@@ -92,7 +92,7 @@ def record_result(
             file_hash,
             filename,
             status,
-            datetime.now(),
+            datetime.now().isoformat(),
             report_path
         )
     )
