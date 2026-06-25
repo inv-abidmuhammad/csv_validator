@@ -60,3 +60,104 @@ def validate_duplicates(df):
         )
 
     return errors
+
+
+def is_valid_string(value):
+    return isinstance(value, str) and str(value).strip() != ""
+
+def is_valid_int(value):
+    try:
+        int(value)
+        return True
+    except (ValueError, TypeError):
+        return False
+    
+
+def is_valid_float(value):
+    try:
+        float(value)
+        return True
+    except (ValueError, TypeError):
+        return False
+    
+
+TRUE_VALUES = {
+    "true",
+    "1",
+    "yes"
+}
+
+FALSE_VALUES = {
+    "false",
+    "0",
+    "no"
+}
+
+def is_valid_boolean(value):
+    return (
+        str(value).strip().lower()
+        in TRUE_VALUES.union(FALSE_VALUES)
+    )
+
+
+def validate_data_types(df, schema):
+    errors = []
+
+    for column, rules in schema.items():
+
+        if column not in df.columns:
+            continue
+
+        expected_type = rules["type"]
+
+        for index, value in df[column].items():
+
+            if pd.isna(value) or str(value).strip() == "":
+                continue
+
+            if expected_type == "int" and not is_valid_int(value):
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": column,
+                        "value": value,
+                        "error": "Invalid data type, expected int"
+                    }
+                )
+            elif expected_type == "float" and not is_valid_float(value):
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": column,
+                        "value": value,
+                        "error": "Invalid data type, expected float"
+                    }
+                )
+            elif expected_type == "boolean" and not is_valid_boolean(value):
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": column,
+                        "value": value,
+                        "error": "Invalid data type, expected boolean"
+                    }
+                )
+    return errors
+
+
+def validate_csv(df, schema):
+    all_errors = []
+    
+    column_errors = validate_columns(df, schema)
+    required_field_errors = validate_required_fields(df, schema)
+    duplicate_errors = validate_duplicates(df)
+    type_errors = validate_data_types(df, schema)
+
+    all_errors = (
+        column_errors +
+        required_field_errors +
+        duplicate_errors +
+        type_errors
+    )
+
+    return all_errors

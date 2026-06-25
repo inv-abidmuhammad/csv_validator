@@ -1,5 +1,7 @@
 venv/
 database/
+reports/
+logs/
 input/
 schemas/
 
