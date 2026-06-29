@@ -6,7 +6,7 @@ from validator.logger_config import setup_logger
 setup_logger()
 logger = logging.getLogger(__name__)
 
-from validator.file_utils import generate_file_hash
+from validator.file_utils import generate_file_hash, generate_combined_hash
 from validator.scanner import get_csv_files, get_schema_files
 from validator.schema_loader import load_schema
 from validator.csv_reader import read_csv
@@ -68,32 +68,29 @@ if len(schema_files) > 1:
 else:
     selected_schema = schema_files[0]
 
-logger.info(
-    f"Selected schema: {selected_schema.name}"
-)
+logger.info(f"Selected schema: {selected_schema.name}")
 
 try:
     schema = load_schema(selected_schema)
-    logger.info(
-        f"Schema loaded successfully: {selected_schema.name}"
-    )
+    logger.info(f"Schema loaded successfully: {selected_schema.name}")
     print(schema)
 except ValueError as e:
     logger.error(f"Schema validation layout failed: {e}")
     sys.exit(1)
 
+schema_hash = generate_file_hash(selected_schema)
 
 for csv_file in csv_files:
     file_hash = generate_file_hash(csv_file)
-    status = get_file_status(
-        db_path,
-        file_hash
-    )
+    combined_hash = generate_combined_hash(file_hash, schema_hash)
+
+    status = get_file_status(db_path, combined_hash)
 
     if status:
         logger.info(
-            f"File {csv_file.name} skipped. Already processed with status: {status}.\n"
-            f"Existing Report: {get_report_path(db_path, file_hash)}"
+            f"File {csv_file.name} skipped. Already processed with this schema "
+            f"with status: {status}.\n"
+            f"Existing Report: {get_report_path(db_path, combined_hash)}"
         )
         continue
 
@@ -103,15 +100,12 @@ for csv_file in csv_files:
         logger.error(f"Failed to read/parse {csv_file.name}: {e}")
         continue
 
-    logger.info(
-        f"Processing file: {csv_file.name}"
-    )
+    logger.info(f"Processing file: {csv_file.name}")
 
     errors = validate_csv(df, schema)
 
     logger.info(
-        f"Validation completed for "
-        f"{csv_file.name}. "
+        f"Validation completed for {csv_file.name}. "
         f"Found {len(errors)} errors."
     )
 
@@ -121,15 +115,13 @@ for csv_file in csv_files:
         config["report_folder"]
     )
 
-    logger.info(
-        f"Report generated: {report_path}"
-    )
+    logger.info(f"Report generated: {report_path}")
 
     result = FAILED if errors else SUCCESS
 
     record_result(
         db_path,
-        file_hash,
+        combined_hash,
         csv_file.name,
         result,
         report_path

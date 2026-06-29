@@ -8,3 +8,7 @@ def generate_file_hash(file_path):
             hasher.update(chunk)
     return hasher.hexdigest()
 
+
+def generate_combined_hash(file_hash: str, schema_hash: str) -> str:
+    combined = file_hash + schema_hash
+    return hashlib.sha256(combined.encode()).hexdigest()

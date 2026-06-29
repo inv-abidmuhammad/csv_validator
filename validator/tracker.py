@@ -11,7 +11,7 @@ def initialize_db(db_path):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS processed_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_hash TEXT UNIQUE NOT NULL,
+            combined_hash TEXT UNIQUE NOT NULL,
             filename TEXT NOT NULL,
             status TEXT NOT NULL,
             processed_at TIMESTAMP NOT NULL,
@@ -23,20 +23,19 @@ def initialize_db(db_path):
     conn.close()
 
 
-def get_file_status(db_path, file_hash):
+def get_file_status(db_path, combined_hash):
     conn = sqlite3.connect(db_path)
 
     cursor = conn.execute(
         """
         SELECT status
         FROM processed_files
-        WHERE file_hash = ?
+        WHERE combined_hash = ?
         """,
-        (file_hash,)
+        (combined_hash,)
     )
 
     row = cursor.fetchone()
-
     conn.close()
 
     if row:
@@ -45,20 +44,19 @@ def get_file_status(db_path, file_hash):
     return None
 
 
-def get_report_path(db_path, file_hash):
+def get_report_path(db_path, combined_hash):
     conn = sqlite3.connect(db_path)
 
     cursor = conn.execute(
         """
         SELECT report_path
         FROM processed_files
-        WHERE file_hash = ?
+        WHERE combined_hash = ?
         """,
-        (file_hash,)
+        (combined_hash,)
     )
 
     row = cursor.fetchone()
-
     conn.close()
 
     if row:
@@ -66,10 +64,10 @@ def get_report_path(db_path, file_hash):
 
     return None
 
-    
+
 def record_result(
     db_path,
-    file_hash,
+    combined_hash,
     filename,
     status,
     report_path
@@ -80,7 +78,7 @@ def record_result(
     conn.execute(
         """
         INSERT OR REPLACE INTO processed_files (
-            file_hash,
+            combined_hash,
             filename,
             status,
             processed_at,
@@ -89,7 +87,7 @@ def record_result(
         VALUES (?, ?, ?, ?, ?)
         """,
         (
-            file_hash,
+            combined_hash,
             filename,
             status,
             datetime.now().isoformat(),
