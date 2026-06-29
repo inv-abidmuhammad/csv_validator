@@ -64,11 +64,12 @@ class TestArgParsing:
         assert result.returncode != 0
         assert "--file and --schema must be provided together" in result.stderr
 
-    def test_schema_without_file_errors(self, tmp_path):
+    def test_schema_without_file_runs_batch_mode(self, tmp_path):
+        """--schema alone is valid — it runs batch mode without the interactive prompt."""
         make_project(tmp_path)
         result = run_main(tmp_path, ["--schema", "schema.json"])
-        assert result.returncode != 0
-        assert "--file and --schema must be provided together" in result.stderr
+        # No CSV files exist, so it exits with a warning — but it's not an arg error
+        assert "--file and --schema must be provided together" not in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -231,3 +232,74 @@ class TestBatchModeUnaffected:
         assert result.returncode == 0
         assert "already processed" not in result.stderr.lower()
         assert "[INDEPENDENT RUN]" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Batch mode with --schema flag (cron-friendly)
+# ---------------------------------------------------------------------------
+
+class TestBatchModeSchemaFlag:
+    def test_batch_schema_flag_skips_prompt(self, tmp_path):
+        """--schema in batch mode should process without any interactive input."""
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+        assert result.returncode == 0
+
+    def test_batch_schema_flag_processes_files(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        run_main(tmp_path, ["--schema", "schema.json"])
+        conn = sqlite3.connect(config["database_path"])
+        rows = conn.execute("SELECT * FROM processed_files").fetchall()
+        conn.close()
+        assert len(rows) == 1
+
+    def test_batch_schema_flag_missing_schema_errors(self, tmp_path):
+        make_project(
+            tmp_path,
+            csv_content="name\nAlice\n",
+            schema_content={"columns": {"name": {"type": "string", "required": True}}},
+        )
+        result = run_main(tmp_path, ["--schema", "missing.json"])
+        assert result.returncode != 0
+        assert "not found in schema folder" in result.stderr
+
+    def test_batch_schema_flag_still_skips_processed_files(self, tmp_path):
+        """DB skip behaviour should still apply in cron/batch mode."""
+        make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        run_main(tmp_path, ["--schema", "schema.json"])
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+        assert "already processed" in result.stderr.lower()
+
+    def test_batch_schema_flag_does_not_trigger_single_mode(self, tmp_path):
+        """--schema alone should NOT be treated as single mode (no --file)."""
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+        assert "[INDEPENDENT RUN]" not in result.stderr

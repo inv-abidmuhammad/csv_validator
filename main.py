@@ -29,12 +29,13 @@ from validator.tracker import (
 
 parser = argparse.ArgumentParser(description="CSV Validation Application")
 parser.add_argument("--file", help="Single CSV filename to validate (must be in input folder)")
-parser.add_argument("--schema", help="Schema filename to validate against (must be in schema folder)")
+parser.add_argument("--schema", help="Schema filename to use (must be in schema folder). "
+                                     "Required in single mode. In batch mode, skips the interactive prompt.")
 args = parser.parse_args()
 
-single_mode = args.file is not None or args.schema is not None
+single_mode = args.file is not None
 
-if single_mode and not (args.file and args.schema):
+if single_mode and not args.schema:
     parser.error("--file and --schema must be provided together for a single run.")
 
 # ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ try:
     with open("config/config.json") as config_file:
         config = json.load(config_file)
 except FileNotFoundError:
-    logger.critical("Config file 'config/config.json' missing.")
+    logger.critical("Config file 'config/config.json' missing. Exiting.")
     sys.exit(1)
 
 db_path = config["database_path"]
@@ -63,13 +64,12 @@ if single_mode:
     csv_path = Path(config["input_folder"]) / args.file
     schema_path = Path(config["schema_folder"]) / args.schema
 
-
     if not csv_path.exists():
-        logger.critical(f"[INDEPENDENT RUN] File not found in input folder: {args.file}")
+        logger.critical(f"[INDEPENDENT RUN] File not found in input folder: {args.file}. Exiting.")
         sys.exit(1)
 
     if not schema_path.exists():
-        logger.critical(f"[INDEPENDENT RUN] Schema not found in schema folder: {args.schema}")
+        logger.critical(f"[INDEPENDENT RUN] Schema not found in schema folder: {args.schema}. Exiting.")
         sys.exit(1)
 
     try:
@@ -105,8 +105,8 @@ if single_mode:
     )
     record_result(db_path, combined_hash, args.file, result, report_path)
 
-    logger.info(f"[INDEPENDENT RUN] Result: {result} | Report: {report_path}")
-    logger.info("[INDEPENDENT RUN] Finished")
+    logger.info(f"[INDEPENDENT RUN] Stored execution result for {args.file}: {result}")
+    logger.info("File processed. CSV Validation Application Finished")
     sys.exit(0)
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,14 @@ for index, file in enumerate(schema_files, start=1):
 
 print()
 
-if len(schema_files) > 1:
+if args.schema:
+    # Schema provided via flag — skip interactive prompt
+    schema_path = Path(config["schema_folder"]) / args.schema
+    if not schema_path.exists():
+        logger.critical(f"Schema not found in schema folder: {args.schema}. Exiting.")
+        sys.exit(1)
+    selected_schema = schema_path
+elif len(schema_files) > 1:
     print("Multiple schema files found. Please select the one to use for validation:")
     while True:
         try:
