@@ -1,6 +1,8 @@
+import argparse
 import json
 import sys
 import logging
+from pathlib import Path
 from validator.logger_config import setup_logger
 
 setup_logger()
@@ -21,6 +23,24 @@ from validator.tracker import (
     record_result
 )
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+parser = argparse.ArgumentParser(description="CSV Validation Application")
+parser.add_argument("--file", help="Single CSV filename to validate (must be in input folder)")
+parser.add_argument("--schema", help="Schema filename to validate against (must be in schema folder)")
+args = parser.parse_args()
+
+single_mode = args.file is not None or args.schema is not None
+
+if single_mode and not (args.file and args.schema):
+    parser.error("--file and --schema must be provided together for a single run.")
+
+# ---------------------------------------------------------------------------
+# Config & DB
+# ---------------------------------------------------------------------------
+
 logger.info("CSV Validation Application Started")
 
 try:
@@ -32,6 +52,66 @@ except FileNotFoundError:
 
 db_path = config["database_path"]
 initialize_db(db_path)
+
+# ---------------------------------------------------------------------------
+# Single mode
+# ---------------------------------------------------------------------------
+
+if single_mode:
+    logger.info(f"[INDEPENDENT RUN] File: {args.file} | Schema: {args.schema}")
+
+    csv_path = Path(config["input_folder"]) / args.file
+    schema_path = Path(config["schema_folder"]) / args.schema
+
+
+    if not csv_path.exists():
+        logger.critical(f"[INDEPENDENT RUN] File not found in input folder: {args.file}")
+        sys.exit(1)
+
+    if not schema_path.exists():
+        logger.critical(f"[INDEPENDENT RUN] Schema not found in schema folder: {args.schema}")
+        sys.exit(1)
+
+    try:
+        schema = load_schema(schema_path)
+        logger.info(f"[INDEPENDENT RUN] Schema loaded successfully: {args.schema}")
+    except ValueError as e:
+        logger.error(f"[INDEPENDENT RUN] Schema validation failed: {e}")
+        sys.exit(1)
+
+    try:
+        df = read_csv(csv_path)
+    except Exception as e:
+        logger.error(f"[INDEPENDENT RUN] Failed to read/parse {args.file}: {e}")
+        sys.exit(1)
+
+    logger.info(f"[INDEPENDENT RUN] Processing file: {args.file}")
+
+    errors = validate_csv(df, schema)
+
+    logger.info(
+        f"[INDEPENDENT RUN] Validation completed for {args.file}. "
+        f"Found {len(errors)} errors."
+    )
+
+    report_path = generate_report(args.file, args.schema, errors, config["report_folder"])
+    logger.info(f"[INDEPENDENT RUN] Report generated: {report_path}")
+
+    result = FAILED if errors else SUCCESS
+
+    combined_hash = generate_combined_hash(
+        generate_file_hash(csv_path),
+        generate_file_hash(schema_path)
+    )
+    record_result(db_path, combined_hash, args.file, result, report_path)
+
+    logger.info(f"[INDEPENDENT RUN] Result: {result} | Report: {report_path}")
+    logger.info("[INDEPENDENT RUN] Finished")
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# Batch mode
+# ---------------------------------------------------------------------------
 
 csv_files = get_csv_files(config["input_folder"])
 schema_files = get_schema_files(config["schema_folder"])
@@ -75,7 +155,7 @@ try:
     logger.info(f"Schema loaded successfully: {selected_schema.name}")
     print(schema)
 except ValueError as e:
-    logger.error(f"Schema validation layout failed: {e}")
+    logger.error(f"Schema validation failed: {e}")
     sys.exit(1)
 
 schema_hash = generate_file_hash(selected_schema)
@@ -111,6 +191,7 @@ for csv_file in csv_files:
 
     report_path = generate_report(
         csv_file.name,
+        selected_schema.name,
         errors,
         config["report_folder"]
     )

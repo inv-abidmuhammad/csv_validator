@@ -5,14 +5,16 @@ from datetime import datetime
 
 def generate_report(
     filename,
+    schema_name,
     errors,
     report_folder
 ):
     timestamp = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
+        "%Y%m%d_%H%M%S_%f"
     )
     report = {
         "file": filename,
+        "schema": schema_name,
         "status":
             "FAILED"
             if errors
