@@ -15,7 +15,10 @@ from validator.validation_engine import (
     validate_csv,
     validate_data_types,
     validate_duplicates,
+    validate_patterns,
+    validate_ranges,
     validate_required_fields,
+    validate_uniqueness,
 )
 
 
@@ -236,3 +239,126 @@ class TestValidateCsv:
 
     def test_returns_list(self):
         assert isinstance(validate_csv(SAMPLE_DF, SAMPLE_SCHEMA), list)
+
+
+class TestValidatePatterns:
+    EMAIL_SCHEMA = {
+        "email": {"type": "string", "required": True, "pattern": r"^[^@]+@[^@]+\.[^@]+$"},
+    }
+
+    def test_no_errors_for_matching_pattern(self):
+        df = pd.DataFrame({"email": ["alice@example.com", "bob@example.com"]})
+        errors = validate_patterns(df, self.EMAIL_SCHEMA)
+        assert errors == []
+
+    def test_error_for_non_matching_pattern(self):
+        df = pd.DataFrame({"email": ["not-an-email"]})
+        errors = validate_patterns(df, self.EMAIL_SCHEMA)
+        assert len(errors) == 1
+        assert errors[0]["column"] == "email"
+        assert "pattern" in errors[0]["error"].lower()
+
+    def test_skips_columns_without_pattern_rule(self):
+        df = pd.DataFrame({"name": ["whatever"]})
+        errors = validate_patterns(df, SAMPLE_SCHEMA)
+        assert errors == []
+
+    def test_skips_null_values(self):
+        df = pd.DataFrame({"email": [None]})
+        errors = validate_patterns(df, self.EMAIL_SCHEMA)
+        assert errors == []
+
+    def test_skips_missing_columns(self):
+        df = pd.DataFrame({"other_col": ["x"]})
+        errors = validate_patterns(df, self.EMAIL_SCHEMA)
+        assert errors == []
+
+    def test_row_number_correct(self):
+        df = pd.DataFrame({"email": ["alice@example.com", "bad-email"]})
+        errors = validate_patterns(df, self.EMAIL_SCHEMA)
+        assert errors[0]["row"] == 3  # 2nd data row
+
+
+class TestValidateRanges:
+    AGE_SCHEMA = {
+        "age": {"type": "int", "required": True, "min": 0, "max": 120},
+    }
+
+    def test_no_errors_within_range(self):
+        df = pd.DataFrame({"age": [0, 30, 120]})
+        errors = validate_ranges(df, self.AGE_SCHEMA)
+        assert errors == []
+
+    def test_error_below_minimum(self):
+        df = pd.DataFrame({"age": [-5]})
+        errors = validate_ranges(df, self.AGE_SCHEMA)
+        assert len(errors) == 1
+        assert "minimum" in errors[0]["error"].lower()
+
+    def test_error_above_maximum(self):
+        df = pd.DataFrame({"age": [150]})
+        errors = validate_ranges(df, self.AGE_SCHEMA)
+        assert len(errors) == 1
+        assert "maximum" in errors[0]["error"].lower()
+
+    def test_skips_columns_without_range_rules(self):
+        df = pd.DataFrame({"name": ["Alice"]})
+        errors = validate_ranges(df, SAMPLE_SCHEMA)
+        assert errors == []
+
+    def test_skips_non_numeric_values(self):
+        """Type errors are handled by validate_data_types; ranges should not double-report."""
+        df = pd.DataFrame({"age": ["not_a_number"]})
+        errors = validate_ranges(df, self.AGE_SCHEMA)
+        assert errors == []
+
+    def test_skips_null_values(self):
+        df = pd.DataFrame({"age": [None]})
+        errors = validate_ranges(df, self.AGE_SCHEMA)
+        assert errors == []
+
+    def test_min_only_rule(self):
+        schema = {"age": {"type": "int", "required": True, "min": 18}}
+        df = pd.DataFrame({"age": [10, 25]})
+        errors = validate_ranges(df, schema)
+        assert len(errors) == 1
+        assert errors[0]["value"] == 10
+
+    def test_max_only_rule(self):
+        schema = {"age": {"type": "int", "required": True, "max": 65}}
+        df = pd.DataFrame({"age": [70, 25]})
+        errors = validate_ranges(df, schema)
+        assert len(errors) == 1
+        assert errors[0]["value"] == 70
+
+
+class TestValidateUniqueness:
+    UNIQUE_SCHEMA = {
+        "employee_id": {"type": "string", "required": True, "unique": True},
+    }
+
+    def test_no_errors_for_unique_values(self):
+        df = pd.DataFrame({"employee_id": ["E1", "E2", "E3"]})
+        errors = validate_uniqueness(df, self.UNIQUE_SCHEMA)
+        assert errors == []
+
+    def test_flags_all_duplicate_occurrences(self):
+        df = pd.DataFrame({"employee_id": ["E1", "E2", "E1"]})
+        errors = validate_uniqueness(df, self.UNIQUE_SCHEMA)
+        # Both the original and the repeat should be flagged
+        assert len(errors) == 2
+
+    def test_skips_columns_without_unique_rule(self):
+        df = pd.DataFrame({"name": ["Alice", "Alice"]})
+        errors = validate_uniqueness(df, SAMPLE_SCHEMA)
+        assert errors == []
+
+    def test_skips_null_values(self):
+        df = pd.DataFrame({"employee_id": [None, None]})
+        errors = validate_uniqueness(df, self.UNIQUE_SCHEMA)
+        assert errors == []
+
+    def test_skips_missing_columns(self):
+        df = pd.DataFrame({"other_col": ["x"]})
+        errors = validate_uniqueness(df, self.UNIQUE_SCHEMA)
+        assert errors == []
