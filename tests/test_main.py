@@ -17,7 +17,7 @@ ROOT = Path(__file__).parent.parent
 MAIN = ROOT / "main.py"
 
 
-def make_project(tmp_path, csv_content=None, schema_content=None):
+def make_project(tmp_path, csv_content=None, schema_content=None, report_formats=None):
     """Scaffold the minimum folder structure main.py expects."""
     (tmp_path / "input").mkdir()
     (tmp_path / "schemas").mkdir()
@@ -30,6 +30,9 @@ def make_project(tmp_path, csv_content=None, schema_content=None):
         "report_folder": str(tmp_path / "reports"),
         "database_path": str(tmp_path / "tracker.db"),
     }
+    if report_formats is not None:
+        config["report_formats"] = report_formats
+
     (tmp_path / "config" / "config.json").write_text(json.dumps(config))
 
     if csv_content:
@@ -113,6 +116,22 @@ class TestSingleMode:
         run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
         reports = list(Path(config["report_folder"]).glob("*.json"))
         assert len(reports) == 1
+
+    def test_report_contains_summary_stats(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\nBob,not_a_number\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        report_path = next(Path(config["report_folder"]).glob("*.json"))
+        report = json.loads(report_path.read_text())
+        assert report["summary"]["rows_processed"] == 2
+        assert report["summary"]["rows_passed"] == 1
+        assert report["summary"]["rows_failed"] == 1
 
     def test_records_result_in_db(self, tmp_path):
         config = make_project(
@@ -324,3 +343,82 @@ class TestBatchModeSchemaFlag:
         )
         result = run_main(tmp_path, ["--schema", "schema.json"])
         assert "[INDEPENDENT RUN]" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# CSV / HTML report formats (config-driven)
+# ---------------------------------------------------------------------------
+
+class TestReportFormats:
+    def test_no_report_formats_configured_only_json(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        report_folder = Path(config["report_folder"])
+        assert len(list(report_folder.glob("*.json"))) == 1
+        assert len(list(report_folder.glob("*.csv"))) == 0
+        assert len(list(report_folder.glob("*.html"))) == 0
+
+    def test_report_formats_csv_generates_csv_file(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            report_formats=["csv"],
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        report_folder = Path(config["report_folder"])
+        assert len(list(report_folder.glob("*.csv"))) == 1
+
+    def test_report_formats_html_generates_html_file(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            report_formats=["html"],
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        report_folder = Path(config["report_folder"])
+        assert len(list(report_folder.glob("*.html"))) == 1
+
+    def test_report_formats_both_generates_all_three(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            report_formats=["csv", "html"],
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        report_folder = Path(config["report_folder"])
+        assert len(list(report_folder.glob("*.json"))) == 1
+        assert len(list(report_folder.glob("*.csv"))) == 1
+        assert len(list(report_folder.glob("*.html"))) == 1
+
+    def test_works_in_batch_mode_too(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            report_formats=["csv"],
+        )
+        run_main(tmp_path, ["--schema", "schema.json"])
+        report_folder = Path(config["report_folder"])
+        assert len(list(report_folder.glob("*.csv"))) == 1
