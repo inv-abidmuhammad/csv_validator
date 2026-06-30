@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 
 def validate_columns(df, schema):
@@ -145,6 +146,111 @@ def validate_data_types(df, schema):
     return errors
 
 
+def validate_patterns(df, schema):
+    errors = []
+
+    for column, rules in schema.items():
+
+        if "pattern" not in rules:
+            continue
+
+        if column not in df.columns:
+            continue
+
+        compiled_pattern = re.compile(rules["pattern"])
+
+        for index, value in df[column].items():
+
+            if pd.isna(value) or str(value).strip() == "":
+                continue
+
+            if not compiled_pattern.match(str(value)):
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": column,
+                        "value": value,
+                        "error": f"Value does not match required pattern '{rules['pattern']}'"
+                    }
+                )
+
+    return errors
+
+
+def validate_ranges(df, schema):
+    errors = []
+
+    for column, rules in schema.items():
+
+        has_min = "min" in rules
+        has_max = "max" in rules
+
+        if not has_min and not has_max:
+            continue
+
+        if column not in df.columns:
+            continue
+
+        for index, value in df[column].items():
+
+            if pd.isna(value) or str(value).strip() == "":
+                continue
+
+            try:
+                numeric_value = float(value)
+            except (ValueError, TypeError):
+                # Type errors are already reported by validate_data_types.
+                # Skip here to avoid duplicate/confusing errors for the same cell.
+                continue
+
+            if has_min and numeric_value < rules["min"]:
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": column,
+                        "value": value,
+                        "error": f"Value below minimum allowed ({rules['min']})"
+                    }
+                )
+            elif has_max and numeric_value > rules["max"]:
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": column,
+                        "value": value,
+                        "error": f"Value above maximum allowed ({rules['max']})"
+                    }
+                )
+
+    return errors
+
+
+def validate_uniqueness(df, schema):
+    errors = []
+
+    for column, rules in schema.items():
+
+        if not rules.get("unique", False):
+            continue
+
+        if column not in df.columns:
+            continue
+
+        duplicated_mask = df[column].duplicated(keep=False) & df[column].notna()
+
+        for index, value in df[column][duplicated_mask].items():
+            errors.append(
+                {
+                    "row": index + 2,
+                    "column": column,
+                    "value": value,
+                    "error": f"Duplicate value in column marked as unique"
+                }
+            )
+
+    return errors
+
+
 def validate_csv(df, schema):
     all_errors = []
     
@@ -152,12 +258,18 @@ def validate_csv(df, schema):
     required_field_errors = validate_required_fields(df, schema)
     duplicate_errors = validate_duplicates(df)
     type_errors = validate_data_types(df, schema)
+    pattern_errors = validate_patterns(df, schema)
+    range_errors = validate_ranges(df, schema)
+    uniqueness_errors = validate_uniqueness(df, schema)
 
     all_errors = (
         column_errors +
         required_field_errors +
         duplicate_errors +
-        type_errors
+        type_errors +
+        pattern_errors +
+        range_errors +
+        uniqueness_errors
     )
 
     return all_errors
