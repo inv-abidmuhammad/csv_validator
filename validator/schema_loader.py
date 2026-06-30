@@ -8,6 +8,14 @@ SUPPORTED_TYPES = {
     "boolean"
 }
 
+SUPPORTED_CROSS_FIELD_RULE_TYPES = {
+    "greater_than",
+    "greater_than_or_equal",
+    "less_than",
+    "less_than_or_equal",
+    "not_equal",
+}
+
 def load_schema(schema_path):
     with open(schema_path, "r") as schema_file:
         try:
@@ -68,4 +76,45 @@ def validate_schema_structure(schema):
                 f"Column '{col_name}' has invalid 'unique' value; must be a boolean."
             )
 
-    return schema["columns"]
+    cross_field_rules = validate_cross_field_rules_structure(
+        schema.get("cross_field_rules", []),
+        schema["columns"]
+    )
+
+    return {
+        "columns": schema["columns"],
+        "cross_field_rules": cross_field_rules,
+    }
+
+
+def validate_cross_field_rules_structure(cross_field_rules, columns):
+    if not isinstance(cross_field_rules, list):
+        raise ValueError("'cross_field_rules' must be a list.")
+
+    for i, rule in enumerate(cross_field_rules):
+        if "type" not in rule or "field" not in rule or "than" not in rule:
+            raise ValueError(
+                f"cross_field_rules[{i}] must contain 'type', 'field', and 'than'."
+            )
+
+        if rule["type"] not in SUPPORTED_CROSS_FIELD_RULE_TYPES:
+            raise ValueError(
+                f"cross_field_rules[{i}] has unsupported type '{rule['type']}'."
+            )
+
+        if rule["field"] not in columns:
+            raise ValueError(
+                f"cross_field_rules[{i}] references unknown column '{rule['field']}'."
+            )
+
+        if rule["than"] not in columns:
+            raise ValueError(
+                f"cross_field_rules[{i}] references unknown column '{rule['than']}'."
+            )
+
+        if rule["field"] == rule["than"]:
+            raise ValueError(
+                f"cross_field_rules[{i}] cannot compare column '{rule['field']}' to itself."
+            )
+
+    return cross_field_rules
