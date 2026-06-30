@@ -12,6 +12,7 @@ from validator.validation_engine import (
     is_valid_int,
     is_valid_string,
     validate_columns,
+    validate_cross_field_rules,
     validate_csv,
     validate_data_types,
     validate_duplicates,
@@ -221,7 +222,8 @@ class TestValidateDataTypes:
 
 class TestValidateCsv:
     def test_valid_csv_no_errors(self):
-        errors = validate_csv(SAMPLE_DF, SAMPLE_SCHEMA)
+        schema = {"columns": SAMPLE_SCHEMA, "cross_field_rules": []}
+        errors = validate_csv(SAMPLE_DF, schema)
         assert errors == []
 
     def test_aggregates_all_error_types(self):
@@ -233,12 +235,113 @@ class TestValidateCsv:
                 "active": ["true", "false", "true"],
             }
         )
-        errors = validate_csv(df, SAMPLE_SCHEMA)
+        schema = {"columns": SAMPLE_SCHEMA, "cross_field_rules": []}
+        errors = validate_csv(df, schema)
         error_types = {e["error"] for e in errors}
         assert any("missing" in t.lower() for t in error_types)
 
     def test_returns_list(self):
-        assert isinstance(validate_csv(SAMPLE_DF, SAMPLE_SCHEMA), list)
+        schema = {"columns": SAMPLE_SCHEMA, "cross_field_rules": []}
+        assert isinstance(validate_csv(SAMPLE_DF, schema), list)
+
+    def test_includes_cross_field_errors(self):
+        columns = {
+            "start_date": {"type": "int", "required": True},
+            "end_date": {"type": "int", "required": True},
+        }
+        schema = {
+            "columns": columns,
+            "cross_field_rules": [
+                {"type": "greater_than", "field": "end_date", "than": "start_date"}
+            ],
+        }
+        df = pd.DataFrame({"start_date": [10], "end_date": [5]})  # end before start — invalid
+        errors = validate_csv(df, schema)
+        assert any("end_date" in e.get("column", "") for e in errors)
+
+    def test_missing_cross_field_rules_key_defaults_to_empty(self):
+        """Schema dicts without cross_field_rules should not break validate_csv."""
+        schema = {"columns": SAMPLE_SCHEMA}
+        errors = validate_csv(SAMPLE_DF, schema)
+        assert errors == []
+
+
+class TestValidateCrossFieldRules:
+    def test_no_errors_when_rule_satisfied(self):
+        df = pd.DataFrame({"start_date": [1, 5], "end_date": [10, 20]})
+        rules = [{"type": "greater_than", "field": "end_date", "than": "start_date"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors == []
+
+    def test_error_when_rule_violated(self):
+        df = pd.DataFrame({"start_date": [10], "end_date": [5]})
+        rules = [{"type": "greater_than", "field": "end_date", "than": "start_date"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert len(errors) == 1
+        assert errors[0]["column"] == "end_date"
+
+    def test_greater_than_or_equal_allows_equal_values(self):
+        df = pd.DataFrame({"a": [5], "b": [5]})
+        rules = [{"type": "greater_than_or_equal", "field": "a", "than": "b"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors == []
+
+    def test_less_than_rule(self):
+        df = pd.DataFrame({"discount": [50], "price": [40]})
+        rules = [{"type": "less_than", "field": "discount", "than": "price"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert len(errors) == 1
+
+    def test_less_than_or_equal_rule(self):
+        df = pd.DataFrame({"discount": [40], "price": [40]})
+        rules = [{"type": "less_than_or_equal", "field": "discount", "than": "price"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors == []
+
+    def test_not_equal_rule(self):
+        df = pd.DataFrame({"a": [5], "b": [5]})
+        rules = [{"type": "not_equal", "field": "a", "than": "b"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert len(errors) == 1
+
+    def test_skips_null_values(self):
+        df = pd.DataFrame({"start_date": [None], "end_date": [10]})
+        rules = [{"type": "greater_than", "field": "end_date", "than": "start_date"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors == []
+
+    def test_skips_missing_columns(self):
+        df = pd.DataFrame({"start_date": [1]})  # end_date missing entirely
+        rules = [{"type": "greater_than", "field": "end_date", "than": "start_date"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors == []
+
+    def test_skips_non_numeric_values(self):
+        df = pd.DataFrame({"start_date": ["abc"], "end_date": [10]})
+        rules = [{"type": "greater_than", "field": "end_date", "than": "start_date"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors == []
+
+    def test_empty_rules_list_returns_no_errors(self):
+        df = pd.DataFrame({"a": [1], "b": [2]})
+        errors = validate_cross_field_rules(df, [])
+        assert errors == []
+
+    def test_multiple_rules_evaluated_independently(self):
+        df = pd.DataFrame({"start": [10], "end": [5], "price": [100], "discount": [50]})
+        rules = [
+            {"type": "greater_than", "field": "end", "than": "start"},      # violated
+            {"type": "less_than_or_equal", "field": "discount", "than": "price"},  # satisfied
+        ]
+        errors = validate_cross_field_rules(df, rules)
+        assert len(errors) == 1
+        assert errors[0]["column"] == "end"
+
+    def test_row_number_correct(self):
+        df = pd.DataFrame({"start": [1, 10], "end": [5, 5]})
+        rules = [{"type": "greater_than", "field": "end", "than": "start"}]
+        errors = validate_cross_field_rules(df, rules)
+        assert errors[0]["row"] == 3  # 2nd data row violates the rule
 
 
 class TestValidatePatterns:

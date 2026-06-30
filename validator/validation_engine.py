@@ -251,16 +251,76 @@ def validate_uniqueness(df, schema):
     return errors
 
 
+CROSS_FIELD_COMPARATORS = {
+    "greater_than": lambda a, b: a > b,
+    "greater_than_or_equal": lambda a, b: a >= b,
+    "less_than": lambda a, b: a < b,
+    "less_than_or_equal": lambda a, b: a <= b,
+    "not_equal": lambda a, b: a != b,
+}
+
+CROSS_FIELD_DESCRIPTIONS = {
+    "greater_than": "must be greater than",
+    "greater_than_or_equal": "must be greater than or equal to",
+    "less_than": "must be less than",
+    "less_than_or_equal": "must be less than or equal to",
+    "not_equal": "must not be equal to",
+}
+
+
+def validate_cross_field_rules(df, cross_field_rules):
+    errors = []
+
+    for rule in cross_field_rules:
+        field = rule["field"]
+        than = rule["than"]
+        comparator = CROSS_FIELD_COMPARATORS[rule["type"]]
+        description = CROSS_FIELD_DESCRIPTIONS[rule["type"]]
+
+        if field not in df.columns or than not in df.columns:
+            continue
+
+        for index, row in df.iterrows():
+            field_value = row[field]
+            than_value = row[than]
+
+            if pd.isna(field_value) or pd.isna(than_value):
+                continue
+
+            try:
+                field_numeric = float(field_value)
+                than_numeric = float(than_value)
+            except (ValueError, TypeError):
+                # Not numerically comparable — handled by type validation elsewhere.
+                continue
+
+            if not comparator(field_numeric, than_numeric):
+                errors.append(
+                    {
+                        "row": index + 2,
+                        "column": field,
+                        "value": field_value,
+                        "error": f"'{field}' {description} '{than}' ({than_value})"
+                    }
+                )
+
+    return errors
+
+
 def validate_csv(df, schema):
     all_errors = []
-    
-    column_errors = validate_columns(df, schema)
-    required_field_errors = validate_required_fields(df, schema)
+
+    columns = schema["columns"]
+    cross_field_rules = schema.get("cross_field_rules", [])
+
+    column_errors = validate_columns(df, columns)
+    required_field_errors = validate_required_fields(df, columns)
     duplicate_errors = validate_duplicates(df)
-    type_errors = validate_data_types(df, schema)
-    pattern_errors = validate_patterns(df, schema)
-    range_errors = validate_ranges(df, schema)
-    uniqueness_errors = validate_uniqueness(df, schema)
+    type_errors = validate_data_types(df, columns)
+    pattern_errors = validate_patterns(df, columns)
+    range_errors = validate_ranges(df, columns)
+    uniqueness_errors = validate_uniqueness(df, columns)
+    cross_field_errors = validate_cross_field_rules(df, cross_field_rules)
 
     all_errors = (
         column_errors +
@@ -269,7 +329,8 @@ def validate_csv(df, schema):
         type_errors +
         pattern_errors +
         range_errors +
-        uniqueness_errors
+        uniqueness_errors +
+        cross_field_errors
     )
 
     return all_errors

@@ -193,6 +193,27 @@ class TestSingleMode:
         result = run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
         assert "already processed" not in result.stderr.lower()
 
+    def test_cross_field_rule_violation_recorded_as_failed(self, tmp_path):
+        """End-to-end: a schema with cross_field_rules correctly fails a violating row."""
+        config = make_project(
+            tmp_path,
+            csv_content="start_date,end_date\n10,5\n",  # end before start — invalid
+            schema_content={
+                "columns": {
+                    "start_date": {"type": "int", "required": True},
+                    "end_date": {"type": "int", "required": True},
+                },
+                "cross_field_rules": [
+                    {"type": "greater_than", "field": "end_date", "than": "start_date"}
+                ],
+            },
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        conn = sqlite3.connect(config["database_path"])
+        row = conn.execute("SELECT status FROM processed_files").fetchone()
+        conn.close()
+        assert row[0] == "FAILED"
+
 
 # ---------------------------------------------------------------------------
 # Batch mode unaffected
