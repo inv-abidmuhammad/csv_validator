@@ -94,7 +94,7 @@ if single_mode:
         f"Found {len(errors)} errors."
     )
 
-    report_path = generate_report(args.file, args.schema, errors, config["report_folder"])
+    report_path = generate_report(args.file, args.schema, df, errors, config["report_folder"], formats=config.get("report_formats", []))
     logger.info(f"[INDEPENDENT RUN] Report generated: {report_path}")
 
     result = FAILED if errors else SUCCESS
@@ -199,8 +199,10 @@ for csv_file in csv_files:
     report_path = generate_report(
         csv_file.name,
         selected_schema.name,
+        df,
         errors,
-        config["report_folder"]
+        config["report_folder"],
+        formats=config.get("report_formats", [])
     )
 
     logger.info(f"Report generated: {report_path}")
