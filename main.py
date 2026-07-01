@@ -1,10 +1,14 @@
 import argparse
 import json
+import os
 import sys
 import logging
+from datetime import datetime
 from pathlib import Path
 from validator.logger_config import setup_logger
+from dotenv import load_dotenv
 
+load_dotenv()
 setup_logger()
 logger = logging.getLogger(__name__)
 
@@ -14,6 +18,8 @@ from validator.schema_loader import load_schema
 from validator.csv_reader import read_csv
 from validator.validation_engine import validate_csv
 from validator.report_generator import generate_report
+from validator.notifier import send_report_email, send_batch_report_email
+from validator.progress import ProgressReporter
 from validator.tracker import (
     initialize_db,
     FAILED,
@@ -48,11 +54,73 @@ try:
     with open("config/config.json") as config_file:
         config = json.load(config_file)
 except FileNotFoundError:
-    logger.critical("Config file 'config/config.json' missing. Exiting.")
+    logger.critical("Config file 'config/config.json' missing.")
     sys.exit(1)
 
 db_path = config["database_path"]
 initialize_db(db_path)
+
+
+def resolve_smtp_config():
+    """
+    Returns a usable SMTP config dict if email is enabled, else None.
+    Prefers an explicit password in config, but falls back to the
+    SMTP_PASSWORD environment variable so credentials don't need to
+    live in config.json in plaintext.
+    """
+    email_config = config.get("email")
+
+    if not email_config or not email_config.get("enabled", False):
+        return None
+
+    smtp_config = dict(email_config)
+    if not smtp_config.get("password"):
+        smtp_config["password"] = os.getenv("SMTP_PASSWORD")
+
+    return smtp_config
+
+
+def maybe_send_report_email(report_path, tag=""):
+    """
+    Sends a single report via email. Used by single/independent mode,
+    where there's exactly one report — no batching needed.
+
+    Never raises — a broken mail server should not crash a validation run,
+    especially under cron where nobody is watching to retry by hand.
+    """
+    smtp_config = resolve_smtp_config()
+
+    if not smtp_config:
+        return
+
+    try:
+        send_report_email(report_path, smtp_config)
+        logger.info(f"{tag}Report emailed to {smtp_config.get('to_address')}")
+    except Exception as e:
+        logger.error(f"{tag}Failed to send report email: {e}")
+
+
+def maybe_send_batch_report_email(report_paths, summary):
+    """
+    Sends one email for an entire batch run, with all reports zipped into
+    a single attachment. Used by batch mode so that processing 50 files
+    results in 1 email, not 50.
+
+    Never raises — see maybe_send_report_email for rationale.
+    """
+    smtp_config = resolve_smtp_config()
+
+    if not smtp_config or not report_paths:
+        return
+
+    try:
+        send_batch_report_email(report_paths, smtp_config, summary)
+        logger.info(
+            f"Batch report emailed to {smtp_config.get('to_address')} "
+            f"({len(report_paths)} report(s) attached)"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send batch report email: {e}")
 
 # ---------------------------------------------------------------------------
 # Single mode
@@ -65,11 +133,11 @@ if single_mode:
     schema_path = Path(config["schema_folder"]) / args.schema
 
     if not csv_path.exists():
-        logger.critical(f"[INDEPENDENT RUN] File not found in input folder: {args.file}. Exiting.")
+        logger.critical(f"[INDEPENDENT RUN] File not found in input folder: {args.file}")
         sys.exit(1)
 
     if not schema_path.exists():
-        logger.critical(f"[INDEPENDENT RUN] Schema not found in schema folder: {args.schema}. Exiting.")
+        logger.critical(f"[INDEPENDENT RUN] Schema not found in schema folder: {args.schema}")
         sys.exit(1)
 
     try:
@@ -94,8 +162,20 @@ if single_mode:
         f"Found {len(errors)} errors."
     )
 
-    report_path = generate_report(args.file, args.schema, df, errors, config["report_folder"], formats=config.get("report_formats", []))
+    report_formats = set(config.get("report_formats", []))
+    smtp_config_check = resolve_smtp_config()
+    if smtp_config_check:
+        report_formats.add("csv")
+
+    report_path = generate_report(
+        args.file, args.schema, df, errors, config["report_folder"],
+        formats=list(report_formats)
+    )
     logger.info(f"[INDEPENDENT RUN] Report generated: {report_path}")
+
+    if smtp_config_check:
+        csv_report_path = report_path.with_suffix(".csv")
+        maybe_send_report_email(csv_report_path, tag="[INDEPENDENT RUN] ")
 
     result = FAILED if errors else SUCCESS
 
@@ -105,8 +185,8 @@ if single_mode:
     )
     record_result(db_path, combined_hash, args.file, result, report_path)
 
-    logger.info(f"[INDEPENDENT RUN] Stored execution result for {args.file}: {result}")
-    logger.info("File processed. CSV Validation Application Finished")
+    logger.info(f"[INDEPENDENT RUN] Result: {result} | Report: {report_path}")
+    logger.info("[INDEPENDENT RUN] Finished")
     sys.exit(0)
 
 # ---------------------------------------------------------------------------
@@ -138,9 +218,10 @@ if args.schema:
     # Schema provided via flag — skip interactive prompt
     schema_path = Path(config["schema_folder"]) / args.schema
     if not schema_path.exists():
-        logger.critical(f"Schema not found in schema folder: {args.schema}. Exiting.")
+        logger.critical(f"Schema not found in schema folder: {args.schema}")
         sys.exit(1)
     selected_schema = schema_path
+    logger.info(f"Schema selected via argument: {args.schema}")
 elif len(schema_files) > 1:
     print("Multiple schema files found. Please select the one to use for validation:")
     while True:
@@ -162,12 +243,31 @@ try:
     logger.info(f"Schema loaded successfully: {selected_schema.name}")
     print(schema)
 except ValueError as e:
-    logger.error(f"Schema validation failed: {e}")
+    logger.error(f"Schema validation layout failed: {e}")
     sys.exit(1)
 
 schema_hash = generate_file_hash(selected_schema)
 
+batch_smtp_config = resolve_smtp_config()
+batch_report_formats = set(config.get("report_formats", []))
+if batch_smtp_config:
+    batch_report_formats.add("csv")
+
+batch_report_paths = []
+batch_summary = {
+    "schema": selected_schema.name,
+    "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+    "processed": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0,
+}
+
+progress = ProgressReporter(total=len(csv_files), label="Validating files")
+
 for csv_file in csv_files:
+    progress.update(csv_file.name)
+
     file_hash = generate_file_hash(csv_file)
     combined_hash = generate_combined_hash(file_hash, schema_hash)
 
@@ -179,6 +279,7 @@ for csv_file in csv_files:
             f"with status: {status}.\n"
             f"Existing Report: {get_report_path(db_path, combined_hash)}"
         )
+        batch_summary["skipped"] += 1
         continue
 
     try:
@@ -202,10 +303,19 @@ for csv_file in csv_files:
         df,
         errors,
         config["report_folder"],
-        formats=config.get("report_formats", [])
+        formats=list(batch_report_formats)
     )
 
     logger.info(f"Report generated: {report_path}")
+
+    batch_summary["processed"] += 1
+    if errors:
+        batch_summary["failed"] += 1
+    else:
+        batch_summary["passed"] += 1
+
+    if batch_smtp_config:
+        batch_report_paths.append(report_path.with_suffix(".csv"))
 
     result = FAILED if errors else SUCCESS
 
@@ -218,5 +328,9 @@ for csv_file in csv_files:
     )
 
     logger.info(f"Stored execution result for {csv_file.name}: {result}\n")
+
+maybe_send_batch_report_email(batch_report_paths, batch_summary)
+
+progress.finish()
 
 logger.info("All files processed. CSV Validation Application Finished")
