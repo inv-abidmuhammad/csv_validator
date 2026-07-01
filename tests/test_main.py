@@ -17,7 +17,7 @@ ROOT = Path(__file__).parent.parent
 MAIN = ROOT / "main.py"
 
 
-def make_project(tmp_path, csv_content=None, schema_content=None, report_formats=None):
+def make_project(tmp_path, csv_content=None, schema_content=None, report_formats=None, email_config=None):
     """Scaffold the minimum folder structure main.py expects."""
     (tmp_path / "input").mkdir()
     (tmp_path / "schemas").mkdir()
@@ -32,6 +32,8 @@ def make_project(tmp_path, csv_content=None, schema_content=None, report_formats
     }
     if report_formats is not None:
         config["report_formats"] = report_formats
+    if email_config is not None:
+        config["email"] = email_config
 
     (tmp_path / "config" / "config.json").write_text(json.dumps(config))
 
@@ -422,3 +424,243 @@ class TestReportFormats:
         run_main(tmp_path, ["--schema", "schema.json"])
         report_folder = Path(config["report_folder"])
         assert len(list(report_folder.glob("*.csv"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# Email delivery (config-driven, graceful failure)
+# ---------------------------------------------------------------------------
+
+class TestEmailDelivery:
+    def test_no_email_config_does_not_attempt_send(self, tmp_path):
+        """Without an 'email' section, nothing related to email should be logged."""
+        make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        result = run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        assert result.returncode == 0
+        assert "report emailed" not in result.stderr.lower()
+        assert "failed to send report email" not in result.stderr.lower()
+
+    def test_email_disabled_flag_does_not_attempt_send(self, tmp_path):
+        make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            email_config={"enabled": False, "host": "smtp.example.com", "port": 587,
+                          "from_address": "bot@example.com", "to_address": "team@example.com"},
+        )
+        result = run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        assert result.returncode == 0
+        assert "report emailed" not in result.stderr.lower()
+        assert "failed to send report email" not in result.stderr.lower()
+
+    def test_email_failure_does_not_crash_run(self, tmp_path):
+        """
+        Core requirement: an unreachable/misconfigured SMTP server must not
+        crash validation. The report should still be generated and the run
+        should still exit 0, with the failure only logged.
+        """
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            # Deliberately unreachable host/port so the send fails fast
+            email_config={"enabled": True, "host": "127.0.0.1", "port": 1,
+                          "from_address": "bot@example.com", "to_address": "team@example.com"},
+        )
+        result = run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+
+        # The run itself must still succeed
+        assert result.returncode == 0
+
+        # The report must still be generated despite the email failure
+        reports = list(Path(config["report_folder"]).glob("*.json"))
+        assert len(reports) == 1
+
+        # The failure should be logged, not silently swallowed
+        assert "failed to send report email" in result.stderr.lower()
+
+    def test_email_failure_does_not_prevent_db_record(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            email_config={"enabled": True, "host": "127.0.0.1", "port": 1,
+                          "from_address": "bot@example.com", "to_address": "team@example.com"},
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        conn = sqlite3.connect(config["database_path"])
+        rows = conn.execute("SELECT * FROM processed_files").fetchall()
+        conn.close()
+        assert len(rows) == 1
+
+    def test_email_works_in_batch_mode_too(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            email_config={"enabled": True, "host": "127.0.0.1", "port": 1,
+                          "from_address": "bot@example.com", "to_address": "team@example.com"},
+        )
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+        assert result.returncode == 0
+        assert "failed to send batch report email" in result.stderr.lower()
+
+    def test_batch_mode_sends_only_one_email_attempt_for_multiple_files(self, tmp_path):
+        """
+        Core requirement: N files processed in batch mode should result in
+        exactly ONE email attempt, not N. We verify this indirectly by
+        counting log occurrences of the (failing, since host is unreachable)
+        send attempt — it must appear exactly once regardless of file count.
+        """
+        (tmp_path / "input").mkdir()
+        (tmp_path / "schemas").mkdir()
+        (tmp_path / "reports").mkdir()
+        (tmp_path / "config").mkdir()
+
+        config = {
+            "input_folder": str(tmp_path / "input"),
+            "schema_folder": str(tmp_path / "schemas"),
+            "report_folder": str(tmp_path / "reports"),
+            "database_path": str(tmp_path / "tracker.db"),
+            "email": {"enabled": True, "host": "127.0.0.1", "port": 1,
+                      "from_address": "bot@example.com", "to_address": "team@example.com"},
+        }
+        (tmp_path / "config" / "config.json").write_text(json.dumps(config))
+
+        # Three separate CSV files in the input folder
+        for i in range(3):
+            (tmp_path / "input" / f"file{i}.csv").write_text("name,age\nAlice,30\n")
+
+        (tmp_path / "schemas" / "schema.json").write_text(json.dumps({
+            "columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }
+        }))
+
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+
+        assert result.returncode == 0
+        # Exactly one attempt logged, not three
+        assert result.stderr.lower().count("failed to send batch report email") == 1
+
+    def test_batch_mode_generates_csv_reports_for_email_even_without_report_formats_config(self, tmp_path):
+        """CSV reports should be written automatically when email is enabled,
+        even if report_formats doesn't explicitly request 'csv'."""
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            email_config={"enabled": True, "host": "127.0.0.1", "port": 1,
+                          "from_address": "bot@example.com", "to_address": "team@example.com"},
+        )
+        run_main(tmp_path, ["--schema", "schema.json"])
+        csv_reports = list(Path(config["report_folder"]).glob("*.csv"))
+        assert len(csv_reports) == 1
+
+    def test_single_mode_generates_csv_report_for_email(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+            email_config={"enabled": True, "host": "127.0.0.1", "port": 1,
+                          "from_address": "bot@example.com", "to_address": "team@example.com"},
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        csv_reports = list(Path(config["report_folder"]).glob("*.csv"))
+        assert len(csv_reports) == 1
+
+    def test_no_csv_report_written_when_email_disabled_and_not_requested(self, tmp_path):
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        run_main(tmp_path, ["--file", "data.csv", "--schema", "schema.json"])
+        csv_reports = list(Path(config["report_folder"]).glob("*.csv"))
+        assert len(csv_reports) == 0
+
+
+# ---------------------------------------------------------------------------
+# Progress indicator (non-interactive under subprocess — should be silent)
+# ---------------------------------------------------------------------------
+
+class TestProgressIndicator:
+    def test_no_carriage_return_garbage_in_non_interactive_output(self, tmp_path):
+        """
+        subprocess.run captures output via a pipe, never a real TTY, so the
+        progress bar must not render at all here — matching cron behavior.
+        A leaked '\\r' would corrupt a redirected log file.
+        """
+        (tmp_path / "input").mkdir()
+        (tmp_path / "schemas").mkdir()
+        (tmp_path / "reports").mkdir()
+        (tmp_path / "config").mkdir()
+
+        config = {
+            "input_folder": str(tmp_path / "input"),
+            "schema_folder": str(tmp_path / "schemas"),
+            "report_folder": str(tmp_path / "reports"),
+            "database_path": str(tmp_path / "tracker.db"),
+        }
+        (tmp_path / "config" / "config.json").write_text(json.dumps(config))
+
+        for i in range(5):
+            (tmp_path / "input" / f"file{i}.csv").write_text("name,age\nAlice,30\n")
+
+        (tmp_path / "schemas" / "schema.json").write_text(json.dumps({
+            "columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }
+        }))
+
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+
+        assert result.returncode == 0
+        assert "\r" not in result.stdout
+        assert "\r" not in result.stderr
+
+    def test_batch_run_still_completes_normally_with_progress_reporter_active(self, tmp_path):
+        """The progress reporter's presence shouldn't affect the actual run outcome."""
+        config = make_project(
+            tmp_path,
+            csv_content="name,age\nAlice,30\n",
+            schema_content={"columns": {
+                "name": {"type": "string", "required": True},
+                "age": {"type": "int", "required": True},
+            }},
+        )
+        result = run_main(tmp_path, ["--schema", "schema.json"])
+        assert result.returncode == 0
+        conn = sqlite3.connect(config["database_path"])
+        rows = conn.execute("SELECT * FROM processed_files").fetchall()
+        conn.close()
+        assert len(rows) == 1
